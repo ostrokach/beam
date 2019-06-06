@@ -30,6 +30,7 @@ from apache_beam import coders
 from apache_beam.io import filesystems
 from apache_beam.io import textio
 from apache_beam.io import tfrecordio
+from apache_beam.options.pipeline_options import InteractiveRunnerOptions
 from apache_beam.transforms import combiners
 
 try:                    # Python 3
@@ -222,11 +223,15 @@ class FileBasedCacheManager(CacheManager):
 
 class ReadCache(beam.PTransform):
   """A PTransform that reads the PCollections from the cache."""
-  def __init__(self, cache_manager, label):
-    self._cache_manager = cache_manager
+  def __init__(self, label, cache_manager=None):
     self._label = label
+    self._cache_manager = cache_manager
 
   def expand(self, pbegin):
+    if self._cache_manager is None:
+      self._cache_manager = _get_or_create_cache_manager(
+          pbegin.pipeline.runner, pbegin.pipeline._options)
+
     # pylint: disable=expression-not-assigned
     return pbegin | 'Read' >> beam.io.Read(
         self._cache_manager.source('full', self._label))
@@ -234,14 +239,18 @@ class ReadCache(beam.PTransform):
 
 class WriteCache(beam.PTransform):
   """A PTransform that writes the PCollections to the cache."""
-  def __init__(self, cache_manager, label, sample=False, sample_size=0):
-    self._cache_manager = cache_manager
+  def __init__(self, label, cache_manager=None, sample=False, sample_size=0):
     self._label = label
+    self._cache_manager = cache_manager
     self._sample = sample
     self._sample_size = sample_size
 
   def expand(self, pcoll):
     prefix = 'sample' if self._sample else 'full'
+
+    if self._cache_manager is None:
+      self._cache_manager = _get_or_create_cache_manager(
+          pcoll.pipeline.runner, pcoll.pipeline._options)
 
     # We save pcoder that is necessary for proper reading of
     # cached PCollection. _cache_manager.sink(...) call below
@@ -257,6 +266,17 @@ class WriteCache(beam.PTransform):
     # pylint: disable=expression-not-assigned
     return pcoll | 'Write' >> beam.io.Write(
         self._cache_manager.sink(prefix, self._label))
+
+
+def _get_or_create_cache_manager(runner, pipeline_options):
+  if not hasattr(runner, "_cache_manager"):
+    interactive_runner_options = pipeline_options.view_as(
+        InteractiveRunnerOptions)
+    runner._cache_manager = cache.FileBasedCacheManager(
+        interactive_runner_options.cache_location,
+        interactive_runner_options.cache_format,
+    )
+  return runner._cache_manager
 
 
 class SafeFastPrimitivesCoder(coders.Coder):

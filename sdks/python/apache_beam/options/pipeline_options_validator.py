@@ -27,6 +27,7 @@ from builtins import object
 from apache_beam.internal import pickler
 from apache_beam.options.pipeline_options import DebugOptions
 from apache_beam.options.pipeline_options import GoogleCloudOptions
+from apache_beam.options.pipeline_options import InteractiveRunnerOptions
 from apache_beam.options.pipeline_options import SetupOptions
 from apache_beam.options.pipeline_options import StandardOptions
 from apache_beam.options.pipeline_options import TestOptions
@@ -46,8 +47,9 @@ class PipelineOptionsValidator(object):
   """
 
   # Validator will call validate on these subclasses of PipelineOptions
-  OPTIONS = [DebugOptions, GoogleCloudOptions, SetupOptions, StandardOptions,
-             TypeOptions, WorkerOptions, TestOptions]
+  OPTIONS = [DebugOptions, GoogleCloudOptions, InteractiveRunnerOptions,
+             SetupOptions, StandardOptions, TypeOptions, WorkerOptions,
+             TestOptions]
 
   # Possible validation errors.
   ERR_MISSING_OPTION = 'Missing required option: %s.'

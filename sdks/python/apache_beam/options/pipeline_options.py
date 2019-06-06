@@ -503,6 +503,30 @@ class GoogleCloudOptions(PipelineOptions):
     return errors
 
 
+class InteractiveRunnerOptions(PipelineOptions):
+
+  @classmethod
+  def _add_argparse_args(cls, parser):
+    parser.add_argument(
+        '--cache_location',
+        default=None,
+        help=('Location where InteractiveRunner cache files will be stored. '
+              'If not specified, cache files will be stored inside '
+              '--temp_location.'))
+    parser.add_argument(
+        '--cache_format',
+        default='text',
+        choices=['text', 'tfrecord'],
+        help=('The file format that will be used for saving PCollection '
+              'caches. '))
+
+  def validate(self, validator):
+    errors = []
+    errors.extend(
+        validator.validate_optional_argument_positive(self, 'cache_location'))
+    return errors
+
+
 class HadoopFileSystemOptions(PipelineOptions):
   """``HadoopFileSystem`` connection options."""
 

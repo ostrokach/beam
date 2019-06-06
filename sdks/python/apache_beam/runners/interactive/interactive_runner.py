@@ -28,7 +28,9 @@ import logging
 
 import apache_beam as beam
 from apache_beam import runners
-from apache_beam.runners.direct import direct_runner
+from apache_beam.options.pipeline_options import GoogleCloudOptions
+from apache_beam.options.pipeline_options import InteractiveRunnerOptions
+from apache_beam.options.pipeline_options import StandardOptions
 from apache_beam.runners.interactive import cache_manager as cache
 from apache_beam.runners.interactive import pipeline_analyzer
 from apache_beam.runners.interactive.display import display_manager
@@ -44,26 +46,21 @@ class InteractiveRunner(runners.PipelineRunner):
   Allows interactively building and running Beam Python pipelines.
   """
 
-  def __init__(self,
-               underlying_runner=None,
-               cache_dir=None,
-               cache_format='text',
-               render_option=None):
+  def __init__(self, render_option=None):
     """Constructor of InteractiveRunner.
 
     Args:
-      underlying_runner: (runner.PipelineRunner)
-      cache_dir: (str) the directory where PCollection caches are kept
-      cache_format: (str) the file format that should be used for saving
-          PCollection caches. Available options are 'text' and 'tfrecord'.
       render_option: (str) this parameter decides how the pipeline graph is
           rendered. See display.pipeline_graph_renderer for available options.
     """
-    self._underlying_runner = (underlying_runner
-                               or direct_runner.DirectRunner())
-    self._cache_manager = cache.FileBasedCacheManager(cache_dir, cache_format)
     self._renderer = pipeline_graph_renderer.get_renderer(render_option)
+
+    # Session attributes
     self._in_session = False
+    self._underlying_runner = None
+    self._pipeline_options = None
+    self._master_pipeline_result = None
+    self.cache_manager = None
 
   def set_render_option(self, render_option):
     """Sets the rendering option.
@@ -74,11 +71,53 @@ class InteractiveRunner(runners.PipelineRunner):
     """
     self._renderer = pipeline_graph_renderer.get_renderer(render_option)
 
-  def start_session(self):
+  def start_session(self, runner=None, options=None, argv=None):
     """Start the session that keeps back-end managers and workers alive.
     """
     if self._in_session:
+      logging.warning(
+          "A session has already been started. Not starting a new session."
+      )
       return
+
+    # Pipeline is constructed primarily for parsing options and creating runner
+    p = Pipeline(runner=runner, options=options, argv=argv)
+    underlying_runner = p.runner
+    pipeline_options = p._options
+    pipeline_result = None
+
+    standard_options = pipeline_options.view_as(StandardOptions)
+    interactive_runner_options = (
+        pipeline_options.view_as(InteractiveRunnerOptions))
+    if not interactive_runner_options.cache_location:
+      logging.info('Defaulting to the temp_location as cache_location: %s',
+                   standard_options.temp_location)
+      interactive_runner_options.cache_location = standard_options.temp_location
+
+    self._cache_manager = cache.FileBasedCacheManager(
+        interactive_runner_options.cache_location,
+        interactive_runner_options.cache_format,
+    )
+
+    if isinstance(runner, DataflowRunner):
+      # DataFlow runner is special in that it is "serverless" and by default
+      # will relinquish all resources once a pipeline completes. We tell
+      # DataFlow runner to keep the resources that it allocates by passing the
+      # --interactive flag. Subsequent jobs that want to access those resources
+      # should do so by requesting an --update of the original job. The original
+      # job is the job with the user-provided name 'job_name'.
+      google_cloud_options = pipeline_options.view_as(GoogleCloudOptions)
+      assert google_cloud_options.job_name
+      assert not google_cloud_options.update
+      google_cloud_options.interactive = True
+      pipeline_result = (
+          Pipeline(runner=underlying_runner, options=pipeline_options).run()
+      )
+      google_cloud_options.update = True
+
+    self._underlying_runner = underlying_runner
+    self._pipeline_options = pipeline_options
+    self._master_pipeline_result = pipeline_result
 
     enter = getattr(self._underlying_runner, '__enter__', None)
     if enter is not None:
@@ -100,8 +139,19 @@ class InteractiveRunner(runners.PipelineRunner):
       logging.info('Ending session.')
       exit(None, None, None)
 
+    if self._master_pipeline_result is not None:
+      self._master_pipeline_result.cancel()
+
+    self.cleanup()
+
+    self._underlying_runner = None
+    self._pipeline_options = None
+    self._master_pipeline_result = None
+    self._cache_manager = None
+
   def cleanup(self):
-    self._cache_manager.cleanup()
+    if self._cache_manager is not None:
+      self._cache_manager.cleanup()
 
   def apply(self, transform, pvalueish, options):
     # TODO(qinyeli, BEAM-646): Remove runner interception of apply.

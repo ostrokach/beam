@@ -88,6 +88,26 @@ class InteractiveRunner(runners.PipelineRunner):
     else:
       logging.error('Keep alive not supported.')
 
+  def display_session_info(self):
+
+    class SessionInfo(object):
+
+      def __init__(self):
+        pass
+
+      def _repr_html_(self):
+        return (
+            '<p style="padding-left: 5px; padding-right: 5px">'
+            '<a href="'
+            'https://pantheon.corp.google.com/dataflow/jobsDetail/'
+            'locations/us-central1/'
+            'jobs/2019-05-30_14_39_33-6947614184630253675'
+            '">Dashboard</a>'
+            '</p>'
+        )
+
+    return SessionInfo()
+
   def end_session(self):
     """End the session that keeps backend managers and workers alive.
     """

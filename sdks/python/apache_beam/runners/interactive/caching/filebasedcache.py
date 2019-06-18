@@ -72,6 +72,13 @@ class FileBasedCache(PCollectionCache):
                                                 self._writer_kwargs)
       self._coder_is_inferred = True
 
+  @property
+  def timestamp(self):
+    timestamp = 0
+    for path in self._existing_file_paths():
+      timestamp = max(timestamp, FileSystems.last_updated(path))
+    return timestamp
+
   def reader(self, **reader_kwargs):
     kwargs = {
         k: v

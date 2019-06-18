@@ -15,8 +15,10 @@
 # limitations under the License.
 #
 import tempfile
+import time
 import unittest
 import uuid
+
 from mock import MagicMock
 
 from apache_beam.io.filesystems import FileSystems
@@ -42,12 +44,13 @@ class FileBasedCacheTest(unittest.TestCase):
   def tearDown(self):
     FileSystems.delete([self.temp_dir])
 
-  def create_dummy_file(self):
-    filename = self.location + "-" + uuid.uuid1().hex
+  def create_dummy_file(self, location):
+    filename = location + "-" + uuid.uuid1().hex
     while FileSystems.exists(filename):
-      filename = self.location + "-" + uuid.uuid1().hex
+      filename = location + "-" + uuid.uuid1().hex
     with open(filename, "wb") as fout:
       fout.write(b"dummy data")
+    return filename
 
   def test_init(self):
     _ = self._cache_class(self.location)
@@ -63,9 +66,20 @@ class FileBasedCacheTest(unittest.TestCase):
     with self.assertRaises(ValueError):
       _ = self._cache_class(self.location, if_exists="be happy")
 
+  def test_timestamp(self):
+    cache = self._cache_class(self.location)
+    self.assertEqual(cache.timestamp, 0)
+    _ = self.create_dummy_file(self.location)
+    timestamp1 = cache.timestamp
+    # Seems to always pass when delay=0.01 but set higher to prevent flakiness
+    time.sleep(0.1)
+    _ = self.create_dummy_file(self.location)
+    timestamp2 = cache.timestamp
+    self.assertGreater(timestamp2, timestamp1)
+
   def test_overwrite_filled_cache(self):
     cache = self._cache_class(self.location)
-    self.create_dummy_file()
+    _ = self.create_dummy_file(self.location)
 
     def test_write():
       with self.assertRaises(IOError):
@@ -156,7 +170,7 @@ class FileBasedCacheTest(unittest.TestCase):
 
   def test_read(self):
     cache = self._cache_class(self.location)
-    self.create_dummy_file()
+    _ = self.create_dummy_file(self.location)
     self.assertEqual(cache._reader_class()._source.read.call_count, 0)
     cache.read()
     # ..._source._read does not get called unless we get items from iterator
@@ -170,7 +184,7 @@ class FileBasedCacheTest(unittest.TestCase):
   def test_clear(self):
     cache = self._cache_class(self.location)
     self.assertEqual(len(cache._existing_file_paths()), 0)
-    self.create_dummy_file()
+    _ = self.create_dummy_file(self.location)
     self.assertEqual(len(cache._existing_file_paths()), 1)
     cache.clear()
     self.assertEqual(len(cache._existing_file_paths()), 0)

@@ -61,6 +61,18 @@ class PCollectionCache(with_metaclass(abc.ABCMeta)):
     """
     raise NotImplementedError
 
+  @property
+  @abc.abstractmethod
+  def timestamp(self):
+    """Return a timestamp indicating the last time this instance was modified.
+
+    Returns:
+      float: A non-negative number indicating the last time the cache was
+          modified. Caches that were modified more recently should return
+          a larger number.
+    """
+    raise NotImplementedError
+
   @abc.abstractmethod
   def reader(self, **reader_kwargs):
     """Return a reader PTransform which can read a PCollection from cache.

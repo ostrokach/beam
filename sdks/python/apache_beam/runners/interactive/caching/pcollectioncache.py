@@ -53,7 +53,7 @@ class PCollectionCache(with_metaclass(abc.ABCMeta)):
 
   @abc.abstractmethod
   def __init__(self, location, **writer_kwargs):
-    """Instantiate a ``PCollectionCache`` object.
+    """Initialize :class:`PCollectionCache`.
 
     Args:
       location (str): Location where the cache data should be stored.
@@ -63,7 +63,7 @@ class PCollectionCache(with_metaclass(abc.ABCMeta)):
 
   @abc.abstractmethod
   def reader(self, **reader_kwargs):
-    """Return a reader PTransform which can be used to read a PCollection.
+    """Return a reader PTransform which can read a PCollection from cache.
 
     Args:
       **reader_kwargs: Arguments to pass to the underlying reader class.
@@ -76,7 +76,7 @@ class PCollectionCache(with_metaclass(abc.ABCMeta)):
 
   @abc.abstractmethod
   def writer(self):
-    """Return a writer PTransform which can be used to write a PCollection.
+    """Return a writer PTransform which can write a PCollection to cache.
 
     Returns:
       Union[FileBasedSink, NativeSink]: A sink to which we can write
@@ -86,7 +86,7 @@ class PCollectionCache(with_metaclass(abc.ABCMeta)):
 
   @abc.abstractmethod
   def read(self, limit=None, **reader_kwargs):
-    """Return a list of elements in a PCollection.
+    """Return a list of elements inside the cache.
 
     Args:
       limit: Maximum number of elements that should be returned.

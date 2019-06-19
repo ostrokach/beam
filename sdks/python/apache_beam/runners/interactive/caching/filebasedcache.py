@@ -15,6 +15,7 @@
 # limitations under the License.
 #
 import urllib
+import warnings
 
 from apache_beam import coders
 from apache_beam.io import avroio
@@ -23,8 +24,8 @@ from apache_beam.io import textio
 from apache_beam.io import tfrecordio
 from apache_beam.io.filesystems import FileSystems
 from apache_beam.runners.interactive.caching import PCollectionCache
-from apache_beam.typehints import trivial_inference
-from apache_beam.typehints import typehints
+from apache_beam.runners.interactive.caching.datatype_inference import \
+    infer_element_type
 
 try:  # Python 3
   unquote_to_bytes = urllib.parse.unquote_to_bytes
@@ -50,8 +51,8 @@ class FileBasedCache(PCollectionCache):
   def __init__(self, location, if_exists="error", **writer_kwargs):
     self.location = location
     self._writer_kwargs = writer_kwargs
-    self._coder_is_inferred = False
     self._num_writes = 0
+    self._coder_was_provided = "coder" in writer_kwargs
 
     def check_if_exists():
       if if_exists == "overwrite":
@@ -66,11 +67,6 @@ class FileBasedCache(PCollectionCache):
             '`if_exists` must be set to either "error" or "overwrite".')
 
     check_if_exists()
-
-    if self._infer_coder:
-      self._writer_class = register_coder_patch(self._writer_class,
-                                                self._writer_kwargs)
-      self._coder_is_inferred = True
 
   @property
   def timestamp(self):
@@ -90,6 +86,11 @@ class FileBasedCache(PCollectionCache):
 
   def writer(self):
     writer = self._writer_class(self._file_path_prefix, **self._writer_kwargs)
+
+    if self._infer_coder:
+      writer.expand = patch_writer_expand(writer.expand, writer,
+                                          self._writer_kwargs)
+
     self._num_writes += 1
     return writer
 
@@ -102,12 +103,11 @@ class FileBasedCache(PCollectionCache):
   def write(self, elements):
     writer = self.writer()
     if self._infer_coder:
+      # TODO(ostrokach): We might want to infer the element type from the first
+      # N elements, rather than reading the entire iterator.
       elements = list(elements)
-      element_type = typehints.Union[[
-          trivial_inference.instance_to_type(e) for e in elements
-      ]]
+      element_type = infer_element_type(elements)
       register_coder(writer, self._writer_kwargs, element_type)
-      self._coder_is_inferred = True
     handle = writer._sink.open(self._file_path_prefix)
     try:
       for element in elements:
@@ -118,9 +118,8 @@ class FileBasedCache(PCollectionCache):
 
   def clear(self):
     FileSystems.delete(self._existing_file_paths())
-    if self._coder_is_inferred:
+    if not self._coder_was_provided and "coder" in self._writer_kwargs:
       del self._writer_kwargs["coder"]
-      self._coder_is_inferred = False
 
   @property
   def _file_path_prefix(self):
@@ -147,6 +146,10 @@ class TextBasedCache(FileBasedCache):
   _writer_class = textio.WriteToText
   _reader_passthrough_arguments = {"coder", "compression_type"}
 
+  def __init__(self, location, **writer_kwargs):
+    warnings.warn("TextBasedCache is not reliable and should not be used.")
+    super(TextBasedCache, self).__init__(location, **writer_kwargs)
+
 
 class SafeTextBasedCache(FileBasedCache):
 
@@ -154,9 +157,9 @@ class SafeTextBasedCache(FileBasedCache):
   _writer_class = textio.WriteToText
   _reader_passthrough_arguments = {"coder", "compression_type"}
 
-  def __init__(self, file_path_prefix, **writer_kwargs):
+  def __init__(self, location, **writer_kwargs):
     writer_kwargs["coder"] = SafeFastPrimitivesCoder()
-    super(SafeTextBasedCache, self).__init__(file_path_prefix, **writer_kwargs)
+    super(SafeTextBasedCache, self).__init__(location, **writer_kwargs)
 
 
 class TFRecordBasedCache(FileBasedCache):
@@ -186,15 +189,13 @@ def register_coder(writer, writer_kwargs, element_type):
   writer._sink.coder = coder
 
 
-def register_coder_patch(writer_class, writer_kwargs):
+def patch_writer_expand(expand_fn, writer, writer_kwargs):
 
-  class PatchedWriter(writer_class):
+  def expand(pcoll):
+    register_coder(writer, writer_kwargs, pcoll.element_type)
+    return expand_fn(pcoll)
 
-    def expand(self, pcoll):
-      register_coder(self, writer_kwargs, pcoll.element_type)
-      return super(PatchedWriter, self).expand(pcoll)
-
-  return PatchedWriter
+  return expand
 
 
 class SafeFastPrimitivesCoder(coders.Coder):

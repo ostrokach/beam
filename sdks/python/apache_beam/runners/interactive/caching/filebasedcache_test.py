@@ -25,7 +25,7 @@ from apache_beam.io.filesystems import FileSystems
 from apache_beam.runners.interactive.caching.filebasedcache import *
 
 
-class FileBasedCacheTest(unittest.TestCase):
+class FileBasedCacheABCTest(unittest.TestCase):
 
   def _cache_class(self, location, *args, **kwargs):
 
@@ -45,6 +45,7 @@ class FileBasedCacheTest(unittest.TestCase):
     FileSystems.delete([self.temp_dir])
 
   def create_dummy_file(self, location):
+    """Create a dummy file with `location` as the filepath prefix."""
     filename = location + "-" + uuid.uuid1().hex
     while FileSystems.exists(filename):
       filename = location + "-" + uuid.uuid1().hex
@@ -53,6 +54,7 @@ class FileBasedCacheTest(unittest.TestCase):
     return filename
 
   def test_init(self):
+    """Test that the constructor correctly validates arguments."""
     _ = self._cache_class(self.location)
 
     try:
@@ -67,6 +69,7 @@ class FileBasedCacheTest(unittest.TestCase):
       _ = self._cache_class(self.location, if_exists="be happy")
 
   def test_timestamp(self):
+    """Test that the timestamp increases with successive writes."""
     cache = self._cache_class(self.location)
     self.assertEqual(cache.timestamp, 0)
     _ = self.create_dummy_file(self.location)
@@ -78,55 +81,44 @@ class FileBasedCacheTest(unittest.TestCase):
     self.assertGreater(timestamp2, timestamp1)
 
   def test_overwrite_filled_cache(self):
+    """Test cache overwrite behaviour."""
     cache = self._cache_class(self.location)
     _ = self.create_dummy_file(self.location)
 
-    def test_write():
-      with self.assertRaises(IOError):
-        _ = self._cache_class(self.location)
+    # Refuse to create a cache with the same data storage location
+    with self.assertRaises(IOError):
+      _ = self._cache_class(self.location)
 
-    test_write()
+    # Can create a cache with the same storage location in "overwrite" mode
+    _ = self._cache_class(self.location, if_exists="overwrite")
 
-    def test_overwrite():
-      try:
-        _ = self._cache_class(self.location, if_exists="overwrite")
-      except IOError:
-        self.fail("Unexpected IOError when force-overwriting a filled cache.")
-
-    test_overwrite()
-
-    def test_write_after_clear():
-      cache.clear()
-      try:
-        _ = self._cache_class(self.location)
-      except IOError:
-        self.fail("Encountered an IOError when overwriting an empty cache.")
-
-    test_write_after_clear()
+    # Don't need to use "overwrite" mode if we clear the cache first
+    cache.clear()
+    _ = self._cache_class(self.location)
 
   def test_writer_arguments(self):
-    args = ()
+    """Test that the writer arguments get correctly passed onto the writer."""
     kwargs = {"a": 10, "b": "hello"}
-    cache = self._cache_class(self.location, *args, **kwargs)
+    cache = self._cache_class(self.location, **kwargs)
     cache.writer()
-    args_out, kwargs_out = list(cache._writer_class.call_args)
-    self.assertEqual(args_out[1:], args)
+    _, kwargs_out = list(cache._writer_class.call_args)
     self.assertEqual(kwargs_out, kwargs)
 
   def test_reader_arguments(self):
+    """Test that the reader arguemnts get correctly passed onto the reader."""
 
-    def check_reader_passthrough_kwargs(args, kwargs, passthrough):
-      cache = self._cache_class(self.location, *args, **kwargs)
+    def check_reader_passthrough_kwargs(kwargs, passthrough):
+      cache = self._cache_class(self.location, **kwargs)
       cache._reader_passthrough_arguments = passthrough
       cache.reader()
-      args_out, kwargs_out = list(cache._reader_class.call_args)
-      self.assertEqual(args_out[1:], args)
+      _, kwargs_out = list(cache._reader_class.call_args)
       self.assertEqual(kwargs_out, {k: kwargs[k] for k in passthrough})
 
-    check_reader_passthrough_kwargs((), {"a": 10, "b": "hello world"}, {})
-    check_reader_passthrough_kwargs((), {"a": 10, "b": "hello world"}, {"b"})
+    check_reader_passthrough_kwargs({"a": 10, "b": "hello world"}, {})
+    check_reader_passthrough_kwargs({"a": 10, "b": "hello world"}, {"b"})
 
   def test_writer(self):
+    """Test that a new writer is constructed each time `writer()` is called."""
     cache = self._cache_class(self.location)
     self.assertEqual(cache._reader_class.call_count, 0)
     cache.writer()
@@ -135,6 +127,7 @@ class FileBasedCacheTest(unittest.TestCase):
     self.assertEqual(cache._writer_class.call_count, 2)
 
   def test_reader(self):
+    """Test that a new reader is constructed each time `reader()` is called."""
     cache = self._cache_class(self.location)
     self.assertEqual(cache._reader_class.call_count, 0)
     cache.reader()
@@ -143,6 +136,7 @@ class FileBasedCacheTest(unittest.TestCase):
     self.assertEqual(cache._reader_class.call_count, 2)
 
   def test_write(self):
+    """Test the implementation of `write()`."""
     cache = self._cache_class(self.location)
     self.assertEqual(cache._writer_class()._sink.open.call_count, 0)
     self.assertEqual(cache._writer_class()._sink.write_record.call_count, 0)
@@ -169,6 +163,7 @@ class FileBasedCacheTest(unittest.TestCase):
     self.assertEqual(cache._writer_class()._sink.close.call_count, 3)
 
   def test_read(self):
+    """Test the implementation of `read()`."""
     cache = self._cache_class(self.location)
     _ = self.create_dummy_file(self.location)
     self.assertEqual(cache._reader_class()._source.read.call_count, 0)
@@ -182,6 +177,7 @@ class FileBasedCacheTest(unittest.TestCase):
     self.assertEqual(cache._reader_class()._source.read.call_count, 2)
 
   def test_clear(self):
+    """Test that `clear()` correctly cleans up files."""
     cache = self._cache_class(self.location)
     self.assertEqual(len(cache._existing_file_paths()), 0)
     _ = self.create_dummy_file(self.location)

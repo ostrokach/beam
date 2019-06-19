@@ -17,66 +17,64 @@
 #
 from __future__ import absolute_import
 
-import array
-import json
 import os
+import pickle
 import shutil
 import sys
 import tempfile
 import unittest
 import uuid
-
+import dill
 import numpy as np
-import pyarrow as pa
-from nose.plugins.attrib import attr
 from parameterized import parameterized
 from past.builtins import unicode
-from apache_beam.testing.test_pipeline import TestPipeline
 
 from apache_beam import coders
 from apache_beam.io.filesystems import FileSystems
+from apache_beam.runners.interactive.caching.datatype_inference import \
+    infer_avro_schema
+from apache_beam.runners.interactive.caching.datatype_inference import \
+    infer_element_type
+from apache_beam.runners.interactive.caching.datatype_inference import \
+    infer_parquet_schema
 from apache_beam.runners.interactive.caching.filebasedcache import *
+from apache_beam.testing.test_pipeline import TestPipeline
 from apache_beam.transforms import Create
-from apache_beam.typehints import trivial_inference
-from apache_beam.typehints import typehints
 
 if sys.version_info > (3,):
   long = int
 
 # yapf: disable
-DATASET_TEST_DATA = [
+GENERIC_TEST_DATA = [
     #
-    ("empty", []),
-    ("none_1", [None]),
-    ("none_2", [None, None, None]),
-    ("strings_1", ["ABC"]),
-    ("strings_2", ["ABC", "DeF"]),
-    ("strings_3", [u"ABC", u"±♠Ωℑ"]),
-    ("numbers_1", [1.5]),
-    ("numbers_2", [100, -123.456, 78.9]),
-    ("numbers_3", [b"abc123"]),
-    ("bytes_1", [b"abc123", b"aAaAa"]),
-    ("bytes_2", ["ABC", 1.2, 100, 0, -10, None, b"abc123"]),
-    ("mixed_primitive_types", [("a", "b", "c")]),
-    ("tuples_1", [("a", 1, 1.2), ("b", 2, 5.5)]),
-    ("tuples_2", [("a", 1, 1.2), (2.5, "c", None)]),
-    ("tuples_3", [{"col1": "a", "col2": 1, "col3": 1.5}]),
+    ("empty_0", []),
+    ("none_0", [None]),
+    ("none_1", [None, None, None]),
+    ("strings_0", ["ABC"]),
+    ("strings_1", ["ABC", "DeF"]),
+    ("strings_2", [u"ABC", u"±♠Ωℑ"]),
+    ("numbers_0", [1.5]),
+    ("numbers_1", [100, -123.456, 78.9]),
+    ("numbers_2", [b"abc123"]),
+    ("bytes_0", [b"abc123", b"aAaAa"]),
+    ("bytes_1", ["ABC", 1.2, 100, 0, -10, None, b"abc123"]),
+    ("mixed_primitive_types_0", [("a", "b", "c")]),
+    ("tuples_0", [("a", 1, 1.2), ("b", 2, 5.5)]),
+    ("tuples_1", [("a", 1, 1.2), (2.5, "c", None)]),
+    ("tuples_2", [{"col1": "a", "col2": 1, "col3": 1.5}]),
+    ("dictionaries_0", [{}]),
     ("dictionaries_1", [
         {"col1": "a", "col2": 1, "col3": 1.5},
         {"col1": "b", "col2": 2, "col3": 4.5}]),
     ("dictionaries_2", [
         {"col1": "a", "col2": 1, "col3": 1.5},
         {4: 1, 5: 3.4, (6, 7): "a"}]),
-    ("dictionaries_3", [{
-        "col1": "a",
-        "col2": 1,
-        "col3": 1.5
-    }, {
-        "col1": 1,
-        "col2": 3.4,
-        "col3": "a",
-    }]),
-    ("roundtrip_mixed_compound_types", [("a", "b", "c"), ["d", 1], {
+    ("dictionaries_3", [
+        {"col1": "a", "col2": 1.5},
+        {"col1": 1, "col3": u"±♠Ω"},
+    ]),
+    ("dictionaries_4", [{"a": 10}]),
+    ("mixed_compound_types_0", [("a", "b", "c"), ["d", 1], {
         "col1": 1,
         202: 1.234
     }, None, "abc", b"def", 100, (1, 2, 3, "b")])
@@ -84,50 +82,23 @@ DATASET_TEST_DATA = [
 # yapf: enable
 
 # yapf: disable
-AVRO_TEST_DATA = [
-    # TODO(ostrokach): Empty PCollections not supported by Arrow.
-    ("empty_1", []),
-    ("empty_2", [{}]),
-    ("empty_3", [{}, {}, {}]),
-    # TODO(ostrokach): Rows with missing columns not supported by Arrow / Avro.
-    # ("string_1", [{"col1": "abc", "col2": "def"}, {"col1": "hello"}]),
-    ("string_1", [
+DATAFRAME_TEST_DATA = [
+    ("empty_0", []),
+    ("empty_1", [{}]),
+    ("empty_2", [{}, {}, {}]),
+    ("missing_columns_0", [{"col1": "abc", "col2": "def"}, {"col1": "hello"}]),
+    ("string_0", [
         {"col1": "abc", "col2": "def"},
         {"col1": "hello", "col2": "good bye"}]),
-    ("string_2", [
-        {"col1": b"abc", "col2": "def"},
-        {"col1": b"hello", "col2": "good bye"}]),
-    ("string_3", [
-        {"col1": u"abc", "col2": u"±♠Ω"},
-        {"col1": u"hello", "col2": u"Ωℑ"}]),
-    ("numeric_1", [{"x": 123, "y": 5.55}, {"x": 555, "y": 6.63}]),
-    ("numeric_2", [{"x": 123, "y": 5.55}, {"x": 555, "y": 6.63}]),
-    # TODO(ostrokach): Arrays are not supported (but not difficult to implement)
-    # ("array_1", [{"x": np.array([1,2])}, {"x": np.array([3,4, 5])}]),
-]
-# yapf: enable
-
-# yapf: disable
-PARQUET_TEST_DATA = [
-    # TODO(ostrokach): Empty PCollections not supported by PyArrow.
-    # ("empty_1", []),
-    # ("empty_2", [{}]),
-    # ("empty_3", [{}, {}, {}]),
-    # TODO(ostrokach): Rows with missing columns not supported by Arrow / Avro.
-    # ("string_1", [{"col1": "abc", "col2": "def"}, {"col1": "hello"}]),
     ("string_1", [
-        {"col1": "abc", "col2": "def"},
-        {"col1": "hello", "col2": "good bye"}]),
-    ("string_2", [
         {"col1": b"abc", "col2": "def"},
         {"col1": b"hello", "col2": "good bye"}]),
-    ("string_3", [
+    ("string_2", [
         {"col1": u"abc", "col2": u"±♠Ω"},
         {"col1": u"hello", "col2": u"Ωℑ"}]),
+    ("numeric_0", [{"x": 123, "y": 5.55}, {"x": 555, "y": 6.63}]),
     ("numeric_1", [{"x": 123, "y": 5.55}, {"x": 555, "y": 6.63}]),
-    ("numeric_2", [{"x": 123, "y": 5.55}, {"x": 555, "y": 6.63}]),
-    # TODO(ostrokach): Arrays are not supported (but not difficult to implement)
-    ("array_1", [{"x": np.array([1,2])}, {"x": np.array([3,4, 5])}]),
+    ("array_0", [{"x": np.array([1, 2])}, {"x": np.array([3, 4, 5])}]),
 ]
 # yapf: enable
 
@@ -160,70 +131,42 @@ def write_directly(cache, data_in):
   cache.write(data_in)
 
 
-def infer_column_coders(data):
-  column_data = {}
-  for row in data:
-    for key, value in row.items():
-      column_data.setdefault(key, []).append(value)
-  column_coders = {
-      key:
-      typehints.Union[[trivial_inference.instance_to_type(v) for v in value]]
-      for key, value in column_data.items()
-  }
-  return column_coders
+class ExtraAssertions(object):
+
+  def assertElementsEqual(self, data1, data2):
+    try:
+      iter(data1)
+    except TypeError:
+      self.assertEqual(data1, data2)
+      return
+
+    # self.assertEqual(type(data1), type(data2))
+    self.assertEqual(len(data1), len(data2))
+
+    if isinstance(data1, (str, bytes, unicode)):
+      self.assertEqual(data1, data2)
+      return
+
+    if isinstance(data1, dict):
+      self.assertEqual(sorted(data1.keys()), sorted(data2.keys()))
+      for key in data1:
+        self.assertElementsEqual(data1[key], data2[key])
+      return
+
+    if isinstance(data1, np.ndarray):
+      self.assertTrue(np.allclose(data1, data2))
+      return
+
+    for value1, value2 in zip(data1, data2):
+      self.assertElementsEqual(value1, value2)
 
 
-def infer_avro_schema(data, use_fastavro=False):
-  _typehint_to_avro_type = {
-      typehints.Union[[int]]: "int",
-      typehints.Union[[int, None]]: ["int", "null"],
-      typehints.Union[[long]]: "long",
-      typehints.Union[[long, None]]: ["long", "null"],
-      typehints.Union[[float]]: "double",
-      typehints.Union[[float, None]]: ["double", "null"],
-      typehints.Union[[str]]: "string",
-      typehints.Union[[str, None]]: ["string", "null"],
-      typehints.Union[[unicode]]: "string",
-      typehints.Union[[unicode, None]]: ["string", "null"],
-      typehints.Union[[np.ndarray]]: "bytes",
-      typehints.Union[[np.ndarray, None]]: ["bytes", "null"],
-      typehints.Union[[array.array]]: "bytes",
-      typehints.Union[[array.array, None]]: ["bytes", "null"],
-  }
+class FunctionalTestBase(ExtraAssertions):
 
-  column_coders = infer_column_coders(data)
-  avro_fields = [{
-      "name": str(key),
-      "type": _typehint_to_avro_type[value]
-  } for key, value in column_coders.items()]
-  schema_dict = {
-      "namespace": "example.avro",
-      "type": "record",
-      "name": "User",
-      "fields": avro_fields
-  }
-  if use_fastavro:
-    from fastavro import parse_schema
-    return parse_schema(schema_dict)
-  else:
-    import avro.schema
-    return avro.schema.parse(json.dumps(schema_dict))
+  _cache_class = None
 
-
-def infer_parquet_schema(data):
-  column_data = {}
-  for row in data:
-    for key, value in row.items():
-      column_data.setdefault(key, []).append(value)
-  column_types = {
-      key: pa.array(value).type for key, value in column_data.items()
-  }
-  return pa.schema(list(column_types.items()))
-
-
-class CheckCoder(object):
-
-  _default_coder = None
+  def _get_writer_kwargs(self, data):
+    return {}
 
   def setUp(self):
     self.temp_dir = tempfile.mkdtemp()
@@ -232,92 +175,124 @@ class CheckCoder(object):
   def tearDown(self):
     FileSystems.delete([self.temp_dir])
 
-  @parameterized.expand([
-      ("{}-{}".format(write_fn.__name__, data_name), write_fn, data)
-      for write_fn in [write_directly, write_through_pipeline]
-      for data_name, data in DATASET_TEST_DATA
-  ])
-  @attr('IT')
-  def test_coder(self, _, write_fn, data):
-    element_type = typehints.Union[[
-        trivial_inference.instance_to_type(v) for v in data
-    ]]
-    coder = coders.registry.get_coder(element_type)
+  @parameterized.expand([("pickle", pickle), ("dill", dill)])
+  def test_serde_empty(self, _, serializer):
+    test_data = [{"a": 11, "b": "XXX"}, {"a": 20, "b": "YYY"}]
+    cache = self._cache_class(self.location,
+                              **self._get_writer_kwargs(test_data))
+    with self.assertRaises(IOError):
+      _ = list(cache.read())
+    cache_out = serializer.loads(serializer.dumps(cache))
+    with self.assertRaises(IOError):
+      _ = list(cache_out.read())
+    cache_out.write(test_data)
+    self.assertEqual(list(cache_out.read()), test_data)
 
-    cache = self._cache_class(self.location)
-    self.assertEqual(cache._writer_kwargs.get("coder"), self._default_coder)
-    write_fn(cache, data)
-    self.assertEqual(cache._writer_kwargs.get("coder"), coder)
-    cache.clear()
-    self.assertEqual(cache._writer_kwargs.get("coder"), self._default_coder)
+  @parameterized.expand([("pickle", pickle), ("dill", dill)])
+  def test_serde_filled(self, _, serializer):
+    test_data = [{"a": 11, "b": "XXX"}, {"a": 20, "b": "YYY"}]
+    cache = self._cache_class(self.location,
+                              **self._get_writer_kwargs(test_data))
+    cache.write(test_data)
+    self.assertEqual(list(cache.read()), test_data)
+    cache_out = serializer.loads(serializer.dumps(cache))
+    self.assertEqual(list(cache_out.read()), test_data)
 
-
-class CheckRoundtripDataset(object):
-
-  def setUp(self):
-    self.temp_dir = tempfile.mkdtemp()
-    self.location = FileSystems.join(self.temp_dir, self._cache_class.__name__)
-
-  def tearDown(self):
-    FileSystems.delete([self.temp_dir])
-
-  @parameterized.expand([
-      ("{}-{}-{}".format(write_fn.__name__, read_fn.__name__,
-                         data_name), write_fn, read_fn, data)
-      for write_fn in [write_directly, write_through_pipeline]
-      for read_fn in [read_directly, read_through_pipeline]
-      for data_name, data in DATASET_TEST_DATA
-  ])
-  @attr('IT')
-  def test_roundtrip(self, _, write_fn, read_fn, data):
-    cache = self._cache_class(self.location)
+  def check_roundtrip(self, write_fn, read_fn, data):
+    cache = self._cache_class(self.location, **self._get_writer_kwargs(data))
     write_fn(cache, data)
     data_out = read_fn(cache)
-    self.assertEqual(data_out, data)
+    self.assertElementsEqual(data_out, data)
     write_fn(cache, data)
     data_out = read_fn(cache)
-    self.assertEqual(data_out, data * 2)
+    self.assertElementsEqual(data_out, data * 2)
     cache.clear()
     with self.assertRaises(IOError):
       data_out = read_fn(cache)
 
 
+class CoderTestBase(FunctionalTestBase):
+  """Make sure that the coder gets set correctly when we write data to cache."""
+  _default_coder = None
+
+  @parameterized.expand([
+      ("{}-{}".format(data_name, write_fn.__name__), write_fn, data)
+      for data_name, data in GENERIC_TEST_DATA
+      for write_fn in [write_directly, write_through_pipeline]
+  ])
+  def test_coder(self, _, write_fn, data):
+    inferred_coder = self._default_coder or coders.registry.get_coder(
+        infer_element_type(data))
+    cache = self._cache_class(self.location, **self._get_writer_kwargs(data))
+    self.assertEqual(cache._writer_kwargs.get("coder"), self._default_coder)
+    write_fn(cache, data)
+    self.assertEqual(cache._writer_kwargs.get("coder"), inferred_coder)
+    cache.clear()
+    self.assertEqual(cache._writer_kwargs.get("coder"), self._default_coder)
+
+
+class GenericRoundtripTestBase(FunctionalTestBase):
+
+  @parameterized.expand([
+      ("{}-{}-{}".format(
+          data_name,
+          write_fn.__name__,
+          read_fn.__name__,
+      ), write_fn, read_fn, data) for data_name, data in GENERIC_TEST_DATA
+      for write_fn in [write_directly, write_through_pipeline]
+      for read_fn in [read_directly, read_through_pipeline]
+  ])
+  def test_roundtrip(self, _, write_fn, read_fn, data):
+    return self.check_roundtrip(write_fn, read_fn, data)
+
+
+class DataframeRoundtripTestBase(FunctionalTestBase):
+
+  @parameterized.expand([
+      ("{}-{}-{}".format(
+          data_name,
+          write_fn.__name__,
+          read_fn.__name__,
+      ), write_fn, read_fn, data) for data_name, data in DATAFRAME_TEST_DATA
+      for write_fn in [write_directly, write_through_pipeline]
+      for read_fn in [read_directly, read_through_pipeline]
+  ])
+  def test_roundtrip(self, _, write_fn, read_fn, data):
+    return self.check_roundtrip(write_fn, read_fn, data)
+
+
 # TextBasedCache
 
 
-class TextBasedCacheCoderTest(CheckCoder, unittest.TestCase):
+class TextBasedCacheRoundtripTest(GenericRoundtripTestBase, CoderTestBase,
+                                  unittest.TestCase):
 
   _cache_class = TextBasedCache
 
-
-class TextBasedCacheRoundtripTest(CheckRoundtripDataset, unittest.TestCase):
-
-  _cache_class = TextBasedCache
+  def check_roundtrip(self, write_fn, read_fn, data):
+    if data == [{"a": 10}]:
+      self.skipTest(
+          "TextBasedCache crashes for this particular case. "
+          "One of the reasons why it should not be used in production.")
+    return super(TextBasedCacheRoundtripTest,
+                 self).check_roundtrip(write_fn, read_fn, data)
 
 
 # SafeTextBasedCache
 
 
-class SafeTextBasedCacheCoderTest(CheckCoder):
+class SafeTextBasedCacheRoundtripTest(GenericRoundtripTestBase, CoderTestBase,
+                                      unittest.TestCase):
 
   _cache_class = SafeTextBasedCache
   _default_coder = SafeFastPrimitivesCoder()
 
 
-class SafeTextBasedCacheRoundtripTest(CheckRoundtripDataset, unittest.TestCase):
-
-  _cache_class = SafeTextBasedCache
-
-
 # TFRecordBasedCache
 
 
-class TFRecordBasedCacheCoderTest(CheckCoder, unittest.TestCase):
-
-  _cache_class = TFRecordBasedCache
-
-
-class TFRecordBasedCacheRoundtripTest(CheckRoundtripDataset, unittest.TestCase):
+class TFRecordBasedCacheRoundtripTest(GenericRoundtripTestBase, CoderTestBase,
+                                      unittest.TestCase):
 
   _cache_class = TFRecordBasedCache
 
@@ -325,93 +300,61 @@ class TFRecordBasedCacheRoundtripTest(CheckRoundtripDataset, unittest.TestCase):
 ## AvroBasedCache
 
 
-class AvroBasedCacheRoundtripBase(object):
+class AvroBasedCacheRoundtripBase(DataframeRoundtripTestBase):
 
   _cache_class = AvroBasedCache
-  _schema_gen = staticmethod(infer_avro_schema)
 
-  def setUp(self):
-    self.temp_dir = tempfile.mkdtemp()
-    self.location = FileSystems.join(self.temp_dir, self._cache_class.__name__)
-
-  def tearDown(self):
-    FileSystems.delete([self.temp_dir])
-
-  @parameterized.expand([
-      ("{}-{}-{}".format(write_fn.__name__, read_fn.__name__,
-                         data_name), write_fn, read_fn, data)
-      for write_fn in [write_directly, write_through_pipeline]
-      for read_fn in [read_directly, read_through_pipeline]
-      for data_name, data in AVRO_TEST_DATA
-  ])
-  @attr('IT')
-  def test_roundtrip(self, _, write_fn, read_fn, data):
-    schema = self._schema_gen(data, use_fastavro=self._use_fastavro)
-    cache = self._cache_class(self.location,
-                              schema=schema,
-                              use_fastavro=self._use_fastavro)
-    write_fn(cache, data)
-    data_out = read_fn(cache)
-    self.assertEqual(data_out, data)
-    cache.clear()
-    with self.assertRaises(IOError):
-      data_out = read_fn(cache)
+  def check_roundtrip(self, write_fn, read_fn, data):
+    if not data:
+      pass
+    elif not all(
+        (sorted(data[0].keys()) == sorted(d.keys()) for d in data[1:])):
+      self.skipTest("Rows with missing columns are not supported.")
+    elif any((isinstance(v, np.ndarray) for v in data[0].values())):
+      self.skipTest("Array data are not supported.")
+    return super(AvroBasedCacheRoundtripBase,
+                 self).check_roundtrip(write_fn, read_fn, data)
 
 
-@unittest.skipIf(sys.version > (3,),
-                 "On Python 3, Avro is supported only through fastavro")
 class AvroBasedCacheRoundtripTest(AvroBasedCacheRoundtripBase,
                                   unittest.TestCase):
 
-  _use_fastavro = False
+  def _get_writer_kwargs(self, data):
+    if sys.version > (3,):
+      self.skipTest("Only fastavro is supported on Python 3.")
+    use_fastavro = False
+    schema = infer_avro_schema(data, use_fastavro=use_fastavro)
+    return dict(schema=schema, use_fastavro=use_fastavro)
 
 
 class FastAvroBasedCacheRoundtripTest(AvroBasedCacheRoundtripBase,
                                       unittest.TestCase):
 
-  _use_fastavro = True
+  def _get_writer_kwargs(self, data):
+    use_fastavro = True
+    schema = infer_avro_schema(data, use_fastavro=use_fastavro)
+    return dict(schema=schema, use_fastavro=use_fastavro)
 
 
 ## ParquetBasedCache
 
 
-class ParquetBasedCacheRoundtripTest(unittest.TestCase):
+class ParquetBasedCacheRoundtripTest(DataframeRoundtripTestBase,
+                                     unittest.TestCase):
 
   _cache_class = ParquetBasedCache
-  _schema_gen = staticmethod(infer_parquet_schema)
 
-  def setUp(self):
-    self.temp_dir = tempfile.mkdtemp()
-    self.location = FileSystems.join(self.temp_dir, self._cache_class.__name__)
+  def _get_writer_kwargs(self, data):
+    schema = infer_parquet_schema(data)
+    return dict(schema=schema)
 
-  def tearDown(self):
-    FileSystems.delete([self.temp_dir])
-
-  @parameterized.expand([
-      ("{}-{}-{}".format(write_fn.__name__, read_fn.__name__,
-                         data_name), write_fn, read_fn, data)
-      for write_fn in [write_directly, write_through_pipeline]
-      for read_fn in [read_directly, read_through_pipeline]
-      for data_name, data in PARQUET_TEST_DATA
-  ])
-  @attr('IT')
-  def test_roundtrip(self, _, write_fn, read_fn, data):
-    schema = self._schema_gen(data)
-    cache = self._cache_class(self.location, schema=schema)
-    write_fn(cache, data)
-    data_out = read_fn(cache)
-    self.assert_elements_equal(data_out, data)
-    cache.clear()
-    with self.assertRaises(IOError):
-      data_out = read_fn(cache)
-
-  def assert_elements_equal(self, data1, data2):
-    self.assertEqual(len(data1), len(data2))
-    for row1, row2 in zip(data1, data2):
-      self.assertEqual(sorted(row1), sorted(row2))
-      for c in row1:
-        if isinstance(row1[c], (list, np.ndarray)):
-          self.assertTrue(isinstance(row2[c], np.ndarray))
-          self.assertTrue(np.allclose(row1[c], row2[c]))
-        else:
-          self.assertEqual(row1[c], row2[c])
+  def check_roundtrip(self, write_fn, read_fn, data):
+    if not data:
+      self.skipTest("Empty PCollections are not supported.")
+    elif not data[0]:
+      self.skipTest("PCollections with no columns are not supported.")
+    elif not all(
+        (sorted(data[0].keys()) == sorted(d.keys()) for d in data[1:])):
+      self.skipTest("Rows with missing columns are not supported.")
+    return super(ParquetBasedCacheRoundtripTest,
+                 self).check_roundtrip(write_fn, read_fn, data)

@@ -211,26 +211,6 @@ class FunctionalTestBase(ExtraAssertions):
       data_out = read_fn(cache)
 
 
-class CoderTestBase(FunctionalTestBase):
-  """Make sure that the coder gets set correctly when we write data to cache."""
-  _default_coder = None
-
-  @parameterized.expand([
-      ("{}-{}".format(data_name, write_fn.__name__), write_fn, data)
-      for data_name, data in GENERIC_TEST_DATA
-      for write_fn in [write_directly, write_through_pipeline]
-  ])
-  def test_coder(self, _, write_fn, data):
-    inferred_coder = self._default_coder or coders.registry.get_coder(
-        infer_element_type(data))
-    cache = self._cache_class(self.location, **self._get_writer_kwargs(data))
-    self.assertEqual(cache._writer_kwargs.get("coder"), self._default_coder)
-    write_fn(cache, data)
-    self.assertEqual(cache._writer_kwargs.get("coder"), inferred_coder)
-    cache.clear()
-    self.assertEqual(cache._writer_kwargs.get("coder"), self._default_coder)
-
-
 class GenericRoundtripTestBase(FunctionalTestBase):
 
   @parameterized.expand([
@@ -259,6 +239,26 @@ class DataframeRoundtripTestBase(FunctionalTestBase):
   ])
   def test_roundtrip(self, _, write_fn, read_fn, data):
     return self.check_roundtrip(write_fn, read_fn, data)
+
+
+class CoderTestBase(FunctionalTestBase):
+  """Make sure that the coder gets set correctly when we write data to cache."""
+  _default_coder = None
+
+  @parameterized.expand([
+      ("{}-{}".format(data_name, write_fn.__name__), write_fn, data)
+      for data_name, data in GENERIC_TEST_DATA
+      for write_fn in [write_directly, write_through_pipeline]
+  ])
+  def test_coder(self, _, write_fn, data):
+    inferred_coder = self._default_coder or coders.registry.get_coder(
+        infer_element_type(data))
+    cache = self._cache_class(self.location, **self._get_writer_kwargs(data))
+    self.assertEqual(cache._writer_kwargs.get("coder"), self._default_coder)
+    write_fn(cache, data)
+    self.assertEqual(cache._writer_kwargs.get("coder"), inferred_coder)
+    cache.clear()
+    self.assertEqual(cache._writer_kwargs.get("coder"), self._default_coder)
 
 
 # TextBasedCache

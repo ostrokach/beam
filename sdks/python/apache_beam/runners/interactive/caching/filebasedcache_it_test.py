@@ -36,7 +36,7 @@ from apache_beam.runners.interactive.caching.datatype_inference import \
 from apache_beam.runners.interactive.caching.datatype_inference import \
     infer_element_type
 from apache_beam.runners.interactive.caching.datatype_inference import \
-    infer_parquet_schema
+    infer_pyarrow_schema
 from apache_beam.runners.interactive.caching.filebasedcache import *
 from apache_beam.testing.test_pipeline import TestPipeline
 from apache_beam.transforms import Create
@@ -345,7 +345,7 @@ class ParquetBasedCacheRoundtripTest(DataframeRoundtripTestBase,
   _cache_class = ParquetBasedCache
 
   def _get_writer_kwargs(self, data):
-    schema = infer_parquet_schema(data)
+    schema = infer_pyarrow_schema(data)
     return dict(schema=schema)
 
   def check_roundtrip(self, write_fn, read_fn, data):

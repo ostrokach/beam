@@ -47,6 +47,7 @@ Typical usage::
 from __future__ import absolute_import
 
 import abc
+import copy
 import logging
 import os
 import re
@@ -57,6 +58,7 @@ from builtins import zip
 
 from future.utils import with_metaclass
 
+import apache_beam as beam
 from apache_beam import pvalue
 from apache_beam.internal import pickler
 from apache_beam.io.filesystems import FileSystems
@@ -482,6 +484,9 @@ class Pipeline(object):
       finally:
         transform.label = old_label
 
+    if self._options.view_as(StandardOptions).interactive:
+      self = clone_pipeline(self)
+
     full_label = '/'.join([self._current_transform().full_label,
                            label or transform.label]).lstrip('/')
     if full_label in self.applied_labels:
@@ -700,6 +705,43 @@ class Pipeline(object):
       return p, context
     else:
       return p
+
+
+def clone_pcollection(pcoll):
+
+  new_pipeline = clone_pipeline(pcoll.pipeline)
+
+  producer = None
+  if isinstance(pcoll, beam.pvalue.PBegin):
+    pvalue_class = beam.pvalue.PBegin
+  elif isinstance(pcoll, beam.pvalue.PDone):
+    pvalue_class = beam.pvalue.PDone
+  elif isinstance(pcoll, beam.pvalue.PCollection):
+    pvalue_class = beam.pvalue.PCollection
+    producer = pcoll.producer
+  else:
+    pvalue_class = beam.pvalue.PValue
+
+  logging.info("%s %s", type(pcoll), pvalue_class.__name__)
+
+  new_pcoll = pvalue_class(
+      new_pipeline, tag=pcoll.tag, element_type=pcoll.element_type,
+      windowing=getattr(pcoll, "_windowing", None))
+  new_pcoll.producer = producer
+  return new_pcoll
+
+
+def clone_pipeline(pipeline):
+  p = beam.Pipeline(runner=pipeline.runner, options=pipeline._options)
+  p.transforms_stack = [copy.copy(pt) for pt in pipeline.transforms_stack]
+  p.applied_labels = pipeline.applied_labels.copy()
+  # context = pipeline_context.PipelineContext(
+  #     use_fake_coders=False,
+  #     default_environment=None)
+  # root_transform_id = context.transforms.get_id(pipeline._root_transform())
+  # p.transforms_stack = [
+  #     context.transforms.get_by_id(root_transform_id)]
+  return p
 
 
 class PipelineVisitor(object):

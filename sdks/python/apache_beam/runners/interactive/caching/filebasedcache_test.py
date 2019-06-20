@@ -25,7 +25,7 @@ from apache_beam.io.filesystems import FileSystems
 from apache_beam.runners.interactive.caching.filebasedcache import *
 
 
-class FileBasedCacheABCTest(unittest.TestCase):
+class FileBasedCacheTest(unittest.TestCase):
 
   def _cache_class(self, location, *args, **kwargs):
 
@@ -57,16 +57,30 @@ class FileBasedCacheABCTest(unittest.TestCase):
     """Test that the constructor correctly validates arguments."""
     _ = self._cache_class(self.location)
 
-    try:
-      _ = self._cache_class(self.location)
-    except IOError:
-      self.fail("Encountered an IOError when overwriting an empty cache.")
-
     with self.assertRaises(ValueError):
       _ = self._cache_class(self.location, if_exists=None)
 
     with self.assertRaises(ValueError):
       _ = self._cache_class(self.location, if_exists="be happy")
+
+  def test_overwrite_cache(self):
+    """Test cache overwrite behaviour."""
+    cache = self._cache_class(self.location)
+
+    # OK to overwrite empty cache
+    _ = self._cache_class(self.location)
+
+    # Refuse to create a cache with the same data storage location
+    _ = self.create_dummy_file(self.location)
+    with self.assertRaises(IOError):
+      _ = self._cache_class(self.location)
+
+    # OK to overwrite cache when in "overwrite" mode
+    _ = self._cache_class(self.location, if_exists="overwrite")
+
+    # OK to overwrite empty cache
+    cache.clear()
+    _ = self._cache_class(self.location)
 
   def test_timestamp(self):
     """Test that the timestamp increases with successive writes."""
@@ -79,22 +93,6 @@ class FileBasedCacheABCTest(unittest.TestCase):
     _ = self.create_dummy_file(self.location)
     timestamp2 = cache.timestamp
     self.assertGreater(timestamp2, timestamp1)
-
-  def test_overwrite_filled_cache(self):
-    """Test cache overwrite behaviour."""
-    cache = self._cache_class(self.location)
-    _ = self.create_dummy_file(self.location)
-
-    # Refuse to create a cache with the same data storage location
-    with self.assertRaises(IOError):
-      _ = self._cache_class(self.location)
-
-    # Can create a cache with the same storage location in "overwrite" mode
-    _ = self._cache_class(self.location, if_exists="overwrite")
-
-    # Don't need to use "overwrite" mode if we clear the cache first
-    cache.clear()
-    _ = self._cache_class(self.location)
 
   def test_writer_arguments(self):
     """Test that the writer arguments get correctly passed onto the writer."""

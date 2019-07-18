@@ -94,7 +94,10 @@ class PydotRenderer(PipelineGraphRenderer):
     return 'graph'
 
   def render_pipeline_graph(self, pipeline_graph):
-    return pipeline_graph._get_graph().create_svg()  # pylint: disable=protected-access
+    rendered_graph = pipeline_graph._get_graph().create_svg()  # pylint: disable=protected-access
+    if isinstance(rendered_graph, bytes):
+      rendered_graph = rendered_graph.decode("utf-8")
+    return rendered_graph
 
 
 def get_renderer(option=None):

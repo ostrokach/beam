@@ -363,6 +363,10 @@ class StandardOptions(PipelineOptions):
                         default=False,
                         action='store_true',
                         help='Whether to enable streaming mode.')
+    parser.add_argument('--interactive',
+                        default=False,
+                        action='store_true',
+                        help='Whether to enable interactive mode.')
 
 
 class TypeOptions(PipelineOptions):

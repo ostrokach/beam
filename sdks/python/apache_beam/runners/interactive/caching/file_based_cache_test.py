@@ -27,11 +27,12 @@ import uuid
 
 import mock
 import numpy as np
-from parameterized import parameterized
 
 from apache_beam import coders
 from apache_beam.io.filesystems import FileSystems
-from apache_beam.runners.interactive.caching import filebasedcache
+from apache_beam.pipeline import Pipeline
+from apache_beam.pvalue import PCollection
+from apache_beam.runners.interactive.caching import file_based_cache
 from apache_beam.testing import datatype_inference
 
 GENERIC_TEST_DATA = [
@@ -58,6 +59,10 @@ GENERIC_TEST_DATA = [
     [np.zeros((3, 6)), np.ones((10, 22))],
 ]
 
+GENERIC_ELEMENT_TYPES = {
+    datatype_inference.infer_element_type(data) for data in GENERIC_TEST_DATA
+}
+
 
 def read_directly(cache, limit=None, timeout=None):
   return list(itertools.islice(cache.read(), limit))
@@ -80,7 +85,7 @@ class FileBasedCacheTest(unittest.TestCase):
 
   def cache_class(self, location, *args, **kwargs):
 
-    class MockedFileBasedCache(filebasedcache.FileBasedCache):
+    class MockedFileBasedCache(file_based_cache.FileBasedCache):
 
       _reader_class = mock.MagicMock()
       _writer_class = mock.MagicMock()
@@ -161,6 +166,17 @@ class FileBasedCacheTest(unittest.TestCase):
     files = self._glob_files(self.location + "**")
     self.assertEqual(len(files), 0)
 
+  def test_persist_setter_false(self):
+    cache = self.cache_class(self.location, persist=True)
+    _ = self.create_dummy_file(self.location)
+    files = self._glob_files(self.location + "**")
+    self.assertGreater(len(files), 0)
+    cache.persist = False
+    del cache
+    gc.collect()
+    files = self._glob_files(self.location + "**")
+    self.assertEqual(len(files), 0)
+
   def test_persist_true_0(self):
     cache = self.cache_class(self.location, persist=True)
     _ = self.create_dummy_file(self.location)
@@ -180,10 +196,20 @@ class FileBasedCacheTest(unittest.TestCase):
     files = self._glob_files(self.location + "**")
     self.assertGreater(len(files), 0)
 
+  def test_persist_setter_true(self):
+    cache = self.cache_class(self.location, persist=False)
+    _ = self.create_dummy_file(self.location)
+    files = self._glob_files(self.location + "**")
+    self.assertGreater(len(files), 0)
+    cache.persist = True
+    del cache
+    gc.collect()
+    files = self._glob_files(self.location + "**")
+    self.assertGreater(len(files), 0)
+
   def _glob_files(self, pattern):
     files = [
-        metadata.path
-        for match in FileSystems.match([self.location + "**"])
+        metadata.path for match in FileSystems.match([self.location + "**"])
         for metadata in match.metadata_list
     ]
     return files
@@ -200,7 +226,8 @@ class FileBasedCacheTest(unittest.TestCase):
   def test_writer_arguments(self):
     kwargs = {"a": 10, "b": "hello"}
     cache = self.cache_class(self.location, **kwargs)
-    cache.writer()
+    cache._reader_passthrough_arguments = set()
+    cache.writer().expand(DummyPColl(element_type=None))
     _, kwargs_out = list(cache._writer_class.call_args)
     self.assertEqual(kwargs_out, kwargs)
 
@@ -216,12 +243,55 @@ class FileBasedCacheTest(unittest.TestCase):
     check_reader_passthrough_kwargs({"a": 10, "b": "hello world"}, {})
     check_reader_passthrough_kwargs({"a": 10, "b": "hello world"}, {"b"})
 
+  def test_infer_element_type_with_write(self):
+    cache = self.cache_class(self.location)
+    self.assertEqual(cache.element_type, None)
+    for data in GENERIC_TEST_DATA:
+      element_type = datatype_inference.infer_element_type(data)
+      cache.truncate()
+      self.assertEqual(cache.element_type, None)
+      cache.write(data)
+      self.assertEqual(cache.element_type, element_type)
+
+  def test_infer_element_type_with_writer(self):
+    cache = self.cache_class(self.location)
+    self.assertEqual(cache.element_type, None)
+    for data in GENERIC_TEST_DATA:
+      element_type = datatype_inference.infer_element_type(data)
+      cache.truncate()
+      self.assertEqual(cache.element_type, None)
+      cache.writer().expand(DummyPColl(element_type=element_type))
+      self.assertEqual(cache.element_type, element_type)
+
+  def test_default_coder(self):
+    cache = self.cache_class(
+        self.location, coder=file_based_cache.SafeFastPrimitivesCoder)
+    cache._reader_passthrough_arguments = {"coder"}
+    for element_type in GENERIC_ELEMENT_TYPES:
+      cache.truncate()
+      cache.element_type = element_type
+      cache.writer().expand(PCollection(Pipeline(), element_type=None))
+      _, kwargs_out = list(cache._writer_class.call_args)
+      self.assertEqual(
+          kwargs_out.get("coder"), file_based_cache.SafeFastPrimitivesCoder)
+
+  def test_inferred_coder(self):
+    cache = self.cache_class(self.location)
+    cache._reader_passthrough_arguments = {"coder"}
+    for element_type in GENERIC_ELEMENT_TYPES:
+      cache.truncate()
+      cache.element_type = element_type
+      cache.writer().expand(PCollection(Pipeline(), element_type=None))
+      _, kwargs_out = list(cache._writer_class.call_args)
+      self.assertEqual(
+          kwargs_out.get("coder"), coders.registry.get_coder(element_type))
+
   def test_writer(self):
     cache = self.cache_class(self.location)
     self.assertEqual(cache._writer_class.call_count, 0)
-    cache.writer()
+    cache.writer().expand(DummyPColl(element_type=None))
     self.assertEqual(cache._writer_class.call_count, 1)
-    cache.writer()
+    cache.writer().expand(DummyPColl(element_type=None))
     self.assertEqual(cache._writer_class.call_count, 2)
 
   def test_reader(self):
@@ -273,109 +343,33 @@ class FileBasedCacheTest(unittest.TestCase):
   def test_truncate(self):
     cache = self.cache_class(self.location)
     self.assertEqual(
-        len(list(filebasedcache.glob_files(cache.file_pattern))), 1)
+        len(list(file_based_cache.glob_files(cache.file_pattern))), 1)
     _ = self.create_dummy_file(self.location)
     self.assertEqual(
-        len(list(filebasedcache.glob_files(cache.file_pattern))), 2)
+        len(list(file_based_cache.glob_files(cache.file_pattern))), 2)
     cache.truncate()
     self.assertEqual(
-        len(list(filebasedcache.glob_files(cache.file_pattern))), 1)
+        len(list(file_based_cache.glob_files(cache.file_pattern))), 1)
 
   def test_clear_data(self):
     cache = self.cache_class(self.location)
     self.assertEqual(
-        len(list(filebasedcache.glob_files(cache.file_pattern))), 1)
+        len(list(file_based_cache.glob_files(cache.file_pattern))), 1)
     _ = self.create_dummy_file(self.location)
     self.assertEqual(
-        len(list(filebasedcache.glob_files(cache.file_pattern))), 2)
+        len(list(file_based_cache.glob_files(cache.file_pattern))), 2)
     cache.remove()
     self.assertEqual(
-        len(list(filebasedcache.glob_files(cache.file_pattern))), 0)
-
-  def test_clear_metadata(self):
-    # Keep provided coder.
-    cache = self.cache_class(self.location, coder="mock")
-    self.assertEqual(cache.coder, "mock")
-    cache.truncate()
-    self.assertEqual(cache.coder, "mock")
-    cache.remove()
-    # Clean up inferred coder.
-    cache = self.cache_class(self.location)
-    self.assertEqual(cache.coder, None)
-    cache.coder = "mock"
-    cache.truncate()
-    self.assertEqual(cache.coder, None)
+        len(list(file_based_cache.glob_files(cache.file_pattern))), 0)
 
 
-class CoderTestBase(object):
-  """Make sure that the coder gets set correctly when we write data to cache.
+class DummyPColl(object):
 
-  Only applicable to implementations which infer the coder when writing data.
-  """
+  def __init__(self, element_type):
+    self.element_type = element_type
 
-  # Attributes to be set by child classes.
-  cache_class = None
-
-  #: The default coder used by the cache. If None, the coder is inferred.
-  default_coder = None
-
-  def get_writer_kwargs(self, data=None):
-    """Additional arguments to pass through to the writer."""
-    return {}
-
-  def check_coder(self, write_fn, data):
-    inferred_coder = self.default_coder or coders.registry.get_coder(
-        datatype_inference.infer_element_type(data))
-    cache = self.cache_class(self.location, **self.get_writer_kwargs(data))
-    cache.requires_coder = True
-    self.assertEqual(cache.coder, self.default_coder)
-    write_fn(cache, data)
-    self.assertEqual(cache.coder, inferred_coder)
-    cache.truncate()
-    self.assertEqual(cache.coder, self.default_coder)
-
-
-class FileCoderTestBase(CoderTestBase):
-
-  # Attributes to be set by child classes.
-  cache_class = None
-  location = None
-
-  #: The default coder used by the cache. If None, the coder is inferred.
-  default_coder = None
-
-  def setUp(self):
-    self._temp_dir = tempfile.mkdtemp()
-    self.location = FileSystems.join(self._temp_dir, self.cache_class.__name__)
-
-  def tearDown(self):
-    FileSystems.delete([self._temp_dir])
-
-  @parameterized.expand([
-      (write_fn.__name__, write_fn, data)
-      for data in GENERIC_TEST_DATA
-      for write_fn in [write_through_pipeline, write_directly]
-  ])
-  def test_coder(self, _, write_fn, data):
-    # TODO(ostrokach): Trying to mock out the `self.cache_class._writer_class`
-    # attribute leads to a stack overflow error, but there must be a way.
-    self.check_coder(write_fn, data)
-
-
-class TextBasedCacheCoderTest(FileCoderTestBase, unittest.TestCase):
-
-  cache_class = filebasedcache.TextBasedCache
-
-
-class SafeTextBasedCacheCoderTest(FileCoderTestBase, unittest.TestCase):
-
-  cache_class = filebasedcache.SafeTextBasedCache
-  default_coder = filebasedcache.SafeFastPrimitivesCoder()
-
-
-class TFRecordBasedCacheCoderTest(FileCoderTestBase, unittest.TestCase):
-
-  cache_class = filebasedcache.TFRecordBasedCache
+  def __or__(self, unused_other):
+    return self
 
 
 if __name__ == '__main__':

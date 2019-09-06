@@ -28,30 +28,33 @@ import numpy as np
 from parameterized import parameterized
 
 from apache_beam.io.filesystems import FileSystems
-from apache_beam.runners.interactive.caching import filebasedcache
-from apache_beam.runners.interactive.caching import filebasedcache_test
-from apache_beam.testing import datatype_inference
+from apache_beam.runners.interactive.caching import file_based_cache
+from apache_beam.runners.interactive.caching import file_based_cache_test
 from apache_beam.testing.extra_assertions import ExtraAssertionsMixin
 from apache_beam.testing.test_pipeline import TestPipeline
 from apache_beam.testing.util import assert_that
 
 
-def validate_directly(cache, expected):
-  test = TestCase("__init__")
-  actual = list(cache.read())
-  test.assertArrayCountEqual(actual, expected)
+class Validators(unittest.TestCase, ExtraAssertionsMixin):
 
+  def validate_directly(self, cache, expected):
+    actual = list(cache.read())
+    self.assertUnhashableCountEqual(actual, expected)
 
-def validate_through_pipeline(cache, expected):
+  def validate_through_pipeline(self, cache, expected):
 
-  def equal_to_expected(actual):
-    test = TestCase("__init__")
-    test.assertArrayCountEqual(actual, expected)
+    def equal_to_expected(actual):
+      self.assertUnhashableCountEqual(actual, expected)
 
-  p = TestPipeline()
-  pcoll = p | "Read" >> cache.reader()
-  assert_that(pcoll, equal_to_expected)
-  p.run()
+    p = TestPipeline()
+    pcoll = p | "Read" >> cache.reader()
+    assert_that(pcoll, equal_to_expected)
+    p.run()
+
+  if sys.version_info < (3,):
+
+    def runTest(self):
+      pass
 
 
 DATAFRAME_TEST_DATA = [
@@ -88,7 +91,7 @@ class SerializationTestBase(object):
 
   test_data = [{"a": 11, "b": "XXX"}, {"a": 20, "b": "YYY"}]
 
-  def check_serde_empty(self, write_fn, read_fn, serializer):
+  def check_serialize_deserialize_empty(self, write_fn, read_fn, serializer):
     cache = self.cache_class(self.location,
                              **self.get_writer_kwargs(self.test_data))
     cache_out = serializer.loads(serializer.dumps(cache))
@@ -96,7 +99,7 @@ class SerializationTestBase(object):
     data_out = list(read_fn(cache_out, limit=len(self.test_data)))
     self.assertEqual(data_out, self.test_data)
 
-  def check_serde_filled(self, write_fn, read_fn, serializer):
+  def check_serialize_deserialize_filled(self, write_fn, read_fn, serializer):
     cache = self.cache_class(self.location,
                              **self.get_writer_kwargs(self.test_data))
     write_fn(cache, self.test_data)
@@ -118,62 +121,26 @@ class FileSerializationTestBase(SerializationTestBase):
     FileSystems.delete([self._temp_dir])
 
   @parameterized.expand([("pickle", pickle), ("dill", dill)])
-  def test_serde_empty(self, _, serializer):
-    self.check_serde_empty(filebasedcache_test.write_directly,
-                           filebasedcache_test.read_directly, serializer)
+  def test_serialize_deserialize_empty(self, _, serializer):
+    self.check_serialize_deserialize_empty(file_based_cache_test.write_directly,
+                                           file_based_cache_test.read_directly,
+                                           serializer)
 
   @parameterized.expand([("pickle", pickle), ("dill", dill)])
-  def test_serde_filled(self, _, serializer):
-    self.check_serde_filled(filebasedcache_test.write_directly,
-                            filebasedcache_test.read_directly, serializer)
+  def test_serialize_deserialize_filled(self, _, serializer):
+    self.check_serialize_deserialize_filled(
+        file_based_cache_test.write_directly,
+        file_based_cache_test.read_directly, serializer)
 
 
 class TextBasedCacheSerializationTest(FileSerializationTestBase, TestCase):
 
-  cache_class = filebasedcache.TextBasedCache
-
-
-class SafeTextBasedCacheSerializationTest(FileSerializationTestBase, TestCase):
-
-  cache_class = filebasedcache.SafeTextBasedCache
+  cache_class = file_based_cache.TextBasedCache
 
 
 class TFRecordBasedCacheSerializationTest(FileSerializationTestBase, TestCase):
 
-  cache_class = filebasedcache.TFRecordBasedCache
-
-
-class AvroBasedCacheSerializationTest(FileSerializationTestBase, TestCase):
-
-  cache_class = filebasedcache.AvroBasedCache
-
-  def get_writer_kwargs(self, data=None):
-    if sys.version_info > (3,):
-      self.skipTest("Only fastavro is supported on Python 3.")
-    use_fastavro = False
-    schema = datatype_inference.infer_avro_schema(
-        data, use_fastavro=use_fastavro)
-    return dict(schema=schema, use_fastavro=use_fastavro)
-
-
-class FastAvroBasedCacheSerializationTest(FileSerializationTestBase, TestCase):
-
-  cache_class = filebasedcache.AvroBasedCache
-
-  def get_writer_kwargs(self, data=None):
-    use_fastavro = True
-    schema = datatype_inference.infer_avro_schema(
-        data, use_fastavro=use_fastavro)
-    return dict(schema=schema, use_fastavro=use_fastavro)
-
-
-class ParquetBasedCacheSerializationTest(FileSerializationTestBase, TestCase):
-
-  cache_class = filebasedcache.ParquetBasedCache
-
-  def get_writer_kwargs(self, data=None):
-    schema = datatype_inference.infer_pyarrow_schema(data)
-    return dict(schema=schema)
+  cache_class = file_based_cache.TFRecordBasedCache
 
 
 # #############################################################################
@@ -226,10 +193,11 @@ class FileRoundtripTestBase(RoundtripTestBase):
       ("{}-{}".format(write_fn.__name__,
                       validate_fn.__name__), write_fn, validate_fn)
       for write_fn in [
-          filebasedcache_test.write_directly,
-          filebasedcache_test.write_through_pipeline
-      ]
-      for validate_fn in [validate_directly, validate_through_pipeline]
+          file_based_cache_test.write_directly,
+          file_based_cache_test.write_through_pipeline
+      ] for validate_fn in
+      [Validators().validate_directly,
+       Validators().validate_through_pipeline]
   ])
   def test_roundtrip(self, _, write_fn, validate_fn):
     return self.check_roundtrip(write_fn, validate_fn, dataset=self.dataset)
@@ -237,79 +205,14 @@ class FileRoundtripTestBase(RoundtripTestBase):
 
 class TextBasedCacheRoundtripTest(FileRoundtripTestBase, TestCase):
 
-  cache_class = filebasedcache.TextBasedCache
-  dataset = [
-      data for data in filebasedcache_test.GENERIC_TEST_DATA
-      # One particular case where TextBasedCache crashes
-      if data != [{"a": 10}]
-      # Numpy arrays are not supported
-      and not any(isinstance(e, np.ndarray) for e in data)
-  ]
-
-
-class SafeTextBasedCacheRoundtripTest(FileRoundtripTestBase, TestCase):
-
-  cache_class = filebasedcache.SafeTextBasedCache
-  dataset = filebasedcache_test.GENERIC_TEST_DATA
+  cache_class = file_based_cache.TextBasedCache
+  dataset = file_based_cache_test.GENERIC_TEST_DATA
 
 
 class TFRecordBasedCacheRoundtripTest(FileRoundtripTestBase, TestCase):
 
-  cache_class = filebasedcache.TFRecordBasedCache
-  dataset = filebasedcache_test.GENERIC_TEST_DATA
-
-
-class AvroBasedCacheRoundtripBase(FileRoundtripTestBase):
-
-  cache_class = filebasedcache.AvroBasedCache
-  dataset = [
-      data for data in DATAFRAME_TEST_DATA
-      # Empty PCollections are not supported.
-      if data
-      # Rows with missing columns are not supported.
-      and len({tuple(sorted(d.keys())) for d in data}) == 1
-      # Array data are not supported.
-      and not any((isinstance(v, np.ndarray) for v in data[0].values()))
-  ]
-
-  def get_writer_kwargs(self, data=None):
-    if sys.version_info > (3,) and not self.use_fastavro:
-      self.skipTest("Only fastavro is supported on Python 3.")
-    writer_kwargs = {"use_fastavro": self.use_fastavro}
-    if data is not None:
-      writer_kwargs["schema"] = datatype_inference.infer_avro_schema(
-          data, use_fastavro=self.use_fastavro)
-    return writer_kwargs
-
-
-class AvroBasedCacheRoundtripTest(AvroBasedCacheRoundtripBase, TestCase):
-
-  use_fastavro = False
-
-
-class FastAvroBasedCacheRoundtripTest(AvroBasedCacheRoundtripBase, TestCase):
-
-  use_fastavro = True
-
-
-class ParquetBasedCacheRoundtripTest(FileRoundtripTestBase, TestCase):
-
-  cache_class = filebasedcache.ParquetBasedCache
-  dataset = [
-      data for data in DATAFRAME_TEST_DATA
-      # Empty PCollections are not supported.
-      if data
-      # PCollections with no columns are not supported.
-      and data[0]
-      # Rows with missing columns are not supported.
-      and len({tuple(sorted(d.keys())) for d in data}) == 1
-  ]
-
-  def get_writer_kwargs(self, data=None):
-    writer_kwargs = {}
-    if data is not None:
-      writer_kwargs["schema"] = datatype_inference.infer_pyarrow_schema(data)
-    return writer_kwargs
+  cache_class = file_based_cache.TFRecordBasedCache
+  dataset = file_based_cache_test.GENERIC_TEST_DATA
 
 
 if __name__ == '__main__':

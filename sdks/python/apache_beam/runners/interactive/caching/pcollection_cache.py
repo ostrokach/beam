@@ -23,36 +23,6 @@ from future.utils import with_metaclass
 
 class PCollectionCache(with_metaclass(abc.ABCMeta)):
 
-  @property
-  @abc.abstractmethod
-  def _reader_class(self):
-    """A reader PTransform to be used for reading a PCollection from cache.
-
-    Returns:
-      PTransform: A PTransform which reads from a file.
-    """
-    raise NotImplementedError
-
-  @property
-  @abc.abstractmethod
-  def _writer_class(self):
-    """A writer PTransform to be used for writing a PCollection to cache.
-
-    Returns:
-      PTransform: A PTransform which writes to a file.
-    """
-    raise NotImplementedError
-
-  @property
-  @abc.abstractmethod
-  def _reader_passthrough_arguments(self):
-    """Writer arguments, which if provided, shoud be passed onto the reader.
-
-    Returns:
-      Set[str]: A set of writer argument names.
-    """
-    raise NotImplementedError
-
   @abc.abstractmethod
   def __init__(self, location, **writer_kwargs):
     """Initialize PCollectionCache.

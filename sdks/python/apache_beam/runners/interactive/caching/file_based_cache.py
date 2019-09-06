@@ -17,15 +17,12 @@
 from __future__ import absolute_import
 
 import urllib
-import warnings
 
 from apache_beam import coders
-from apache_beam.io import avroio
-from apache_beam.io import parquetio
 from apache_beam.io import textio
 from apache_beam.io import tfrecordio
 from apache_beam.io.filesystems import FileSystems
-from apache_beam.runners.interactive.caching import pcollectioncache
+from apache_beam.runners.interactive.caching import PCollectionCache
 from apache_beam.testing import datatype_inference
 from apache_beam.transforms import PTransform
 
@@ -45,27 +42,40 @@ except AttributeError:  # Python 2
 __all__ = [
     "FileBasedCache",
     "TextBasedCache",
-    "SafeTextBasedCache",
     "TFRecordBasedCache",
-    "ParquetBasedCache",
-    "AvroBasedCache",
     "SafeFastPrimitivesCoder",
 ]
 
 
-class FileBasedCache(pcollectioncache.PCollectionCache):
+class FileBasedCache(PCollectionCache):
 
   def __init__(self, location, mode="error", persist=False, **writer_kwargs):
+    """Initialize a PCollectionCache object.
+
+    Args:
+      location (str): A string indicating the location where the cache should
+          be stored. Typically, this includes the folder and the filename
+          prefix for files that will be created.
+      mode (str): Controls the behavior when one or more files matching location
+          already exit. If "error", an IOError will be raised. If "overwrite",
+          the existing files will be removed.
+      persist (bool): A flag indicating whether the underlying data should be
+          destroyed when the cache instance goes out of scope.
+      writer_kwargs (Dict[str, Any]): A dictionary of key-value pairs
+          to be passed to the underlying writer objects.
+
+    Raises:
+      ~exceptions.ValueError: If the specified mode is not supported.
+      ~exceptions.IOError: If one or more files matching `location` already
+          exist and mode == "error".
+    """
     self.location = location
+    self.element_type = None
+    self.default_coder = writer_kwargs.pop("coder", None)
     self._writer_kwargs = writer_kwargs
-    self.coder = writer_kwargs.pop("coder", None)
-    self._coder_was_provided = self.coder is not None
     self._num_writes = 0
     self._persist = persist
-    self._finalizer = (
-        finalize(self, lambda: None) if self._persist else finalize(
-            self, lambda pattern: FileSystems.delete(
-                list(glob_files(pattern + "**"))), self.file_pattern))
+    self._finalizer = self._configure_finalizer(persist)
 
     # TODO(ostrokach): Implement append mode.
     if mode not in ['error', 'overwrite']:
@@ -92,10 +102,12 @@ class FileBasedCache(pcollectioncache.PCollectionCache):
 
   @persist.setter
   def persist(self, persist):
+    if self._persist == persist:
+      return
     self._persist = persist
-    self._finalizer = (lambda: None) if self._persist else finalize(
-        self, lambda pattern: FileSystems.delete(list(glob_files(pattern))),
-        self.file_pattern)
+    if self._finalizer:
+      self._finalizer.detach()
+    self._finalizer = self._configure_finalizer(persist)
 
   @property
   def timestamp(self):
@@ -105,9 +117,14 @@ class FileBasedCache(pcollectioncache.PCollectionCache):
     return timestamp
 
   def reader(self, **kwargs):
+    """Returns a reader ``PTransform`` to be used for reading the contents of
+    the cache into a Beam Pipeline.
+
+    Args:
+      kwargs (Dict[str, Any]): Arguments to be passed to the underlying reader
+          class.
+    """
     reader_kwargs = self._reader_kwargs.copy()
-    if self.requires_coder:
-      reader_kwargs["coder"] = self.coder
     reader_kwargs.update(kwargs)
     reader = self._reader_class(self.file_pattern, **reader_kwargs)
     # Keep a reference to the parent object so that cache does not get garbage
@@ -116,24 +133,39 @@ class FileBasedCache(pcollectioncache.PCollectionCache):
     return reader
 
   def writer(self):
+    """Returns a writer object to be used for writing the contents of a
+    PCollection from a Beam Pipeline into the cache.
+    """
     self._num_writes += 1
-    if self.requires_coder and self.coder is None:
+    writer_kwargs = self._writer_kwargs.copy()
+
+    if self.element_type is None:
       writer = PatchedWriter(self, self._writer_class,
-                             (self._file_path_prefix,), self._writer_kwargs)
+                             (self._file_path_prefix,), writer_kwargs)
       return writer
 
-    if self.requires_coder:
-      self._writer_kwargs["coder"] = self.coder
-    writer = self._writer_class(self._file_path_prefix, **self._writer_kwargs)
+    if ("coder" in self._reader_passthrough_arguments and
+        "coder" not in writer_kwargs):
+      writer_kwargs["coder"] = (
+          self.default_coder if self.default_coder is not None else
+          coders.registry.get_coder(self.element_type))
+    writer = self._writer_class(self._file_path_prefix, **writer_kwargs)
     # Keep a reference to the parent object so that cache does not get garbage
     # collected while the pipeline is running.
     writer._cache = self
     return writer
 
   def read(self, **kwargs):
+    """Returns an iterator over the contents of the cache.
+
+    Args:
+      kwargs (Dict[str, Any]): Arguments to be passed to the underlying reader
+          class.
+
+    Returns:
+      An iterator over the elements in the cache.
+    """
     reader_kwargs = self._reader_kwargs.copy()
-    if self.requires_coder:
-      reader_kwargs["coder"] = self.coder
     reader_kwargs.update(kwargs)
     source = self.reader(**reader_kwargs)._source
     range_tracker = source.get_range_tracker(None, None)
@@ -141,13 +173,17 @@ class FileBasedCache(pcollectioncache.PCollectionCache):
       yield element
 
   def write(self, elements):
+    """Writes a collection of elements into the cache.
+
+    Args:
+      elements (Iterable[Any]): A collection of elements to be written to cache.
+    """
     self._num_writes += 1
-    if self.requires_coder and self.coder is None:
+    if self.element_type is None:
       # TODO(ostrokach): We might want to infer the element type from the first
       # N elements, rather than reading the entire iterator.
       elements = list(elements)
-      element_type = datatype_inference.infer_element_type(elements)
-      self.coder = coders.registry.get_coder(element_type)
+      self.element_type = datatype_inference.infer_element_type(elements)
     sink = self.writer()._sink
     handle = sink.open(self._file_path_prefix)
     try:
@@ -157,12 +193,16 @@ class FileBasedCache(pcollectioncache.PCollectionCache):
       sink.close(handle)
 
   def truncate(self):
+    """Removes all contents from the cache."""
     FileSystems.delete(list(glob_files(self.file_pattern)))
     FileSystems.create(self._file_path_prefix + ".empty").close()
-    if not self._coder_was_provided and self.coder is not None:
-      self.coder = None
+    self.element_type = None
 
   def remove(self):
+    """Deletes the cache, including all underlying data.
+
+    The cache should not be used after this method is called.
+    """
     self._finalizer()
 
   @property
@@ -174,71 +214,64 @@ class FileBasedCache(pcollectioncache.PCollectionCache):
 
   @property
   def file_pattern(self):
-    return self.location + '*'
+    return self.location + '**'
 
   @property
   def _reader_kwargs(self):
     reader_kwargs = {
-        k: v
-        for k, v in self._writer_kwargs.items()
+        k: v for k, v in self._writer_kwargs.items()
         if k in self._reader_passthrough_arguments
     }
+    if ("coder" in self._reader_passthrough_arguments and
+        "coder" not in reader_kwargs):
+      if self.default_coder is not None:
+        reader_kwargs["coder"] = self.default_coder
+      elif self.element_type is None:
+        reader_kwargs["coder"] = None
+      else:
+        reader_kwargs["coder"] = coders.registry.get_coder(self.element_type)
     return reader_kwargs
 
   @property
   def _file_path_prefix(self):
     return self.location + "-{:03d}".format(self._num_writes)
 
+  def _configure_finalizer(self, persist):
+    if persist:
+      return finalize(self, lambda: None)
+    else:
+      return finalize(
+          self, lambda pattern: FileSystems.delete(list(glob_files(pattern))),
+          self.file_pattern)
+
 
 class TextBasedCache(FileBasedCache):
-
+  """A ``PCollectionCache`` object which uses a text-based file format to store
+  the underlying data.
+  """
   _reader_class = textio.ReadFromText
   _writer_class = textio.WriteToText
   _reader_passthrough_arguments = {"coder", "compression_type"}
-  requires_coder = True
-
-  def __init__(self, location, **writer_kwargs):
-    warnings.warn("TextBasedCache is not reliable and should not be used.")
-    super(TextBasedCache, self).__init__(location, **writer_kwargs)
-
-
-class SafeTextBasedCache(FileBasedCache):
-
-  _reader_class = textio.ReadFromText
-  _writer_class = textio.WriteToText
-  _reader_passthrough_arguments = {"coder", "compression_type"}
-  requires_coder = True
 
   def __init__(self, location, **writer_kwargs):
     writer_kwargs["coder"] = SafeFastPrimitivesCoder()
-    super(SafeTextBasedCache, self).__init__(location, **writer_kwargs)
+    super(TextBasedCache, self).__init__(location, **writer_kwargs)
 
 
 class TFRecordBasedCache(FileBasedCache):
+  """A ``PCollectionCache`` object which uses the TFRecord file format to store
+  the underlying data.
+  """
 
   _reader_class = tfrecordio.ReadFromTFRecord
   _writer_class = tfrecordio.WriteToTFRecord
   _reader_passthrough_arguments = {"coder", "compression_type"}
-  requires_coder = True
-
-
-class ParquetBasedCache(FileBasedCache):
-
-  _reader_class = parquetio.ReadFromParquet
-  _writer_class = parquetio.WriteToParquet
-  _reader_passthrough_arguments = {}
-  requires_coder = False
-
-
-class AvroBasedCache(FileBasedCache):
-
-  _reader_class = avroio.ReadFromAvro
-  _writer_class = avroio.WriteToAvro
-  _reader_passthrough_arguments = {"use_fastavro"}
-  requires_coder = False
 
 
 class PatchedWriter(PTransform):
+  """A wrapper over a write ``PTransform`` which sets the element_type of the
+  parent cache when the writer is expanded into a pipeline.
+  """
 
   def __init__(self, cache, writer_class, writer_args, writer_kwargs):
     self._cache = cache
@@ -247,19 +280,19 @@ class PatchedWriter(PTransform):
     self._writer_kwargs = writer_kwargs
 
   def expand(self, pcoll):
-    if self._cache.requires_coder and self._cache.coder is None:
-      self._cache.coder = coders.registry.get_coder(pcoll.element_type)
+    if self._cache.element_type is None:
+      self._cache.element_type = pcoll.element_type
     writer_kwargs = self._writer_kwargs.copy()
-    if self._cache.requires_coder:
-      writer_kwargs["coder"] = self._cache.coder
+    if "coder" in self._cache._reader_passthrough_arguments:
+      writer_kwargs["coder"] = (
+          self._cache.default_coder if self._cache.default_coder is not None
+          else coders.registry.get_coder(self._cache.element_type))
     writer = self._writer_class(*self._writer_args, **writer_kwargs)
     return pcoll | writer
 
 
 class SafeFastPrimitivesCoder(coders.Coder):
   """This class add an quote/unquote step to escape special characters."""
-
-  # pylint: disable=deprecated-urllib-function
 
   def encode(self, value):
     return quote(

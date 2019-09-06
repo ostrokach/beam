@@ -19,6 +19,8 @@ from __future__ import absolute_import
 import urllib
 
 from apache_beam import coders
+from apache_beam.io import avroio
+from apache_beam.io import parquetio
 from apache_beam.io import textio
 from apache_beam.io import tfrecordio
 from apache_beam.io.filesystems import FileSystems
@@ -43,6 +45,8 @@ __all__ = [
     "FileBasedCache",
     "TextBasedCache",
     "TFRecordBasedCache",
+    "ParquetBasedCache",
+    "AvroBasedCache",
     "SafeFastPrimitivesCoder",
 ]
 
@@ -266,6 +270,28 @@ class TFRecordBasedCache(FileBasedCache):
   _reader_class = tfrecordio.ReadFromTFRecord
   _writer_class = tfrecordio.WriteToTFRecord
   _reader_passthrough_arguments = {"coder", "compression_type"}
+
+
+class ParquetBasedCache(FileBasedCache):
+  """A ``PCollectionCache`` object which uses the Parquet file format to store
+  the underlying data.
+  """
+
+  _reader_class = parquetio.ReadFromParquet
+  _writer_class = parquetio.WriteToParquet
+  _reader_passthrough_arguments = {}
+  requires_coder = False
+
+
+class AvroBasedCache(FileBasedCache):
+  """A ``PCollectionCache`` object which uses the Avro file format to store
+  the underlying data.
+  """
+
+  _reader_class = avroio.ReadFromAvro
+  _writer_class = avroio.WriteToAvro
+  _reader_passthrough_arguments = {"use_fastavro"}
+  requires_coder = False
 
 
 class PatchedWriter(PTransform):

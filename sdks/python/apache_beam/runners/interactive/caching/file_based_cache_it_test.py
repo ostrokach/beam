@@ -30,6 +30,7 @@ from parameterized import parameterized
 from apache_beam.io.filesystems import FileSystems
 from apache_beam.runners.interactive.caching import file_based_cache
 from apache_beam.runners.interactive.caching import file_based_cache_test
+from apache_beam.testing import datatype_inference
 from apache_beam.testing.extra_assertions import ExtraAssertionsMixin
 from apache_beam.testing.test_pipeline import TestPipeline
 from apache_beam.testing.util import assert_that
@@ -143,6 +144,39 @@ class TFRecordBasedCacheSerializationTest(FileSerializationTestBase, TestCase):
   cache_class = file_based_cache.TFRecordBasedCache
 
 
+class AvroBasedCacheSerializationTest(FileSerializationTestBase, TestCase):
+
+  cache_class = file_based_cache.AvroBasedCache
+
+  def get_writer_kwargs(self, data=None):
+    if sys.version_info > (3,):
+      self.skipTest("Only fastavro is supported on Python 3.")
+    use_fastavro = False
+    schema = datatype_inference.infer_avro_schema(
+        data, use_fastavro=use_fastavro)
+    return dict(schema=schema, use_fastavro=use_fastavro)
+
+
+class FastAvroBasedCacheSerializationTest(FileSerializationTestBase, TestCase):
+
+  cache_class = file_based_cache.AvroBasedCache
+
+  def get_writer_kwargs(self, data=None):
+    use_fastavro = True
+    schema = datatype_inference.infer_avro_schema(
+        data, use_fastavro=use_fastavro)
+    return dict(schema=schema, use_fastavro=use_fastavro)
+
+
+class ParquetBasedCacheSerializationTest(FileSerializationTestBase, TestCase):
+
+  cache_class = file_based_cache.ParquetBasedCache
+
+  def get_writer_kwargs(self, data=None):
+    schema = datatype_inference.infer_pyarrow_schema(data)
+    return dict(schema=schema)
+
+
 # #############################################################################
 # Roundtrip
 # #############################################################################
@@ -213,6 +247,83 @@ class TFRecordBasedCacheRoundtripTest(FileRoundtripTestBase, TestCase):
 
   cache_class = file_based_cache.TFRecordBasedCache
   dataset = file_based_cache_test.GENERIC_TEST_DATA
+
+
+class AvroBasedCacheRoundtripBase(FileRoundtripTestBase):
+
+  cache_class = file_based_cache.AvroBasedCache
+  dataset = [
+      data for data in DATAFRAME_TEST_DATA
+      # Empty PCollections are not supported.
+      if data
+      # Rows with missing columns are not supported.
+      and len({tuple(sorted(d.keys())) for d in data}) == 1
+      # Array data are not supported.
+      and not any((isinstance(v, np.ndarray) for v in data[0].values()))
+  ]
+
+  def get_writer_kwargs(self, data=None):
+    if sys.version_info > (3,) and not self.use_fastavro:
+      self.skipTest("Only fastavro is supported on Python 3.")
+    writer_kwargs = {"use_fastavro": self.use_fastavro}
+    if data is not None:
+      writer_kwargs["schema"] = datatype_inference.infer_avro_schema(
+          data, use_fastavro=self.use_fastavro)
+    return writer_kwargs
+
+
+class AvroBasedCacheRoundtripTest(AvroBasedCacheRoundtripBase, TestCase):
+
+  use_fastavro = False
+
+
+class FastAvroBasedCacheRoundtripTest(AvroBasedCacheRoundtripBase, TestCase):
+
+  use_fastavro = True
+
+
+class ParquetBasedCacheRoundtripTest(FileRoundtripTestBase, TestCase):
+
+  cache_class = file_based_cache.ParquetBasedCache
+  dataset = [
+      data for data in DATAFRAME_TEST_DATA
+      # Empty PCollections are not supported.
+      if data
+      # PCollections with no columns are not supported.
+      and data[0]
+      # Rows with missing columns are not supported.
+      and len({tuple(sorted(d.keys())) for d in data}) == 1
+  ]
+
+  def get_writer_kwargs(self, data=None):
+    writer_kwargs = {}
+    if data is not None:
+      writer_kwargs["schema"] = datatype_inference.infer_pyarrow_schema(data)
+    return writer_kwargs
+
+  def check_roundtrip(self, write_fn, validate_fn, dataset):
+    cache = self.cache_class(self.location, **self.get_writer_kwargs(None))
+    for data in dataset:
+      # PyArrow implicitly converts NumPy arrays to lists.
+      # See: https://github.com/pandas-dev/pandas/issues/26121
+      data_expected = [self._array_to_list(d) for d in data]
+      cache._writer_kwargs.update(self.get_writer_kwargs(data))
+      write_fn(cache, data)
+      validate_fn(cache, data_expected)
+      write_fn(cache, data)
+      validate_fn(cache, data_expected * 2)
+      cache.truncate()
+      validate_fn(cache, [])
+    cache.remove()
+
+  def _array_to_list(self, row):
+    new_row = {}
+    for key, value in row.items():
+      if isinstance(value, np.ndarray):
+        new_row[key] = value.tolist()
+      else:
+        new_row[key] = value
+    return new_row
 
 
 if __name__ == '__main__':
